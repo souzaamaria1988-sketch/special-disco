@@ -1,0 +1,446 @@
+name: Build Android APK (Overlay)
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        run: |
+          sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+
+      - name: Generate Android project sources
+        shell: bash
+        run: |
+          set -e
+
+          APPDIR="OverlayApp"
+          PKG="com.seuapp.overlay"
+          PKG_PATH="${PKG//./\/}"
+
+          mkdir -p "$APPDIR"
+          cd "$APPDIR"
+
+          # ---------- Gradle files ----------
+          cat > settings.gradle <<EOF
+          include ':app'
+          EOF
+
+          cat > build.gradle <<EOF
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:7.0.4'
+              }
+          }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          EOF
+
+          mkdir -p app/src/main
+
+          cat > app/build.gradle <<EOF
+          apply plugin: 'com.android.application'
+
+          android {
+              compileSdkVersion 33
+
+              defaultConfig {
+                  applicationId "$PKG"
+                  minSdkVersion 21
+                  targetSdkVersion 33
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+                  }
+              }
+          }
+
+          dependencies {
+          }
+          EOF
+
+          cat > app/proguard-rules.pro <<EOF
+          # vazio
+          EOF
+
+          # ---------- Manifest ----------
+          cat > app/src/main/AndroidManifest.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="$PKG">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:label="@string/app_name"
+                  android:allowBackup="true"
+                  android:supportsRtl="true"
+                  android:theme="@style/AppTheme">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".OverlayService"
+                      android:exported="false" />
+
+              </application>
+          </manifest>
+          EOF
+
+          # ---------- Java source ----------
+          mkdir -p "app/src/main/java/$PKG_PATH"
+
+          cat > "app/src/main/java/$PKG_PATH/MainActivity.java" <<EOF
+          package $PKG;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.View;
+          import android.widget.Button;
+
+          public class MainActivity extends Activity {
+
+              private static final int REQ_OVERLAY = 1001;
+              private static final int REQ_NOTIF = 1002;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_main);
+
+                  Button btnStart = findViewById(R.id.btnStart);
+                  Button btnStop = findViewById(R.id.btnStop);
+
+                  btnStart.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) {
+                          pedirPermissoesSePrecisoEIniciar();
+                      }
+                  });
+
+                  btnStop.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) {
+                          pararOverlay();
+                      }
+                  });
+              }
+
+              private void pedirPermissoesSePrecisoEIniciar() {
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                          requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
+                          return;
+                      }
+                  }
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                  Uri.parse("package:" + getPackageName()));
+                          startActivityForResult(i, REQ_OVERLAY);
+                          return;
+                      }
+                  }
+
+                  iniciarOverlay();
+              }
+
+              private void iniciarOverlay() {
+                  Intent i = new Intent(this, OverlayService.class);
+                  i.setAction(OverlayService.ACTION_START);
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      startForegroundService(i);
+                  } else {
+                      startService(i);
+                  }
+              }
+
+              private void pararOverlay() {
+                  Intent i = new Intent(this, OverlayService.class);
+                  i.setAction(OverlayService.ACTION_STOP);
+                  startService(i);
+              }
+
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+
+                  if (requestCode == REQ_OVERLAY) {
+                      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)) {
+                          iniciarOverlay();
+                      }
+                  }
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+                  if (requestCode == REQ_NOTIF) {
+                      pedirPermissoesSePrecisoEIniciar();
+                  }
+              }
+          }
+          EOF
+
+          cat > "app/src/main/java/$PKG_PATH/OverlayService.java" <<EOF
+          package $PKG;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.graphics.PixelFormat;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.FrameLayout;
+
+          public class OverlayService extends Service {
+
+              public static final String ACTION_START = "$PKG.START";
+              public static final String ACTION_STOP  = "$PKG.STOP";
+
+              private static final String CHANNEL_ID = "overlay_channel";
+              private static final int NOTIF_ID = 1;
+
+              private WindowManager windowManager;
+              private View overlayView;
+              private boolean shown = false;
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  String action = (intent != null) ? intent.getAction() : null;
+
+                  if (ACTION_STOP.equals(action)) {
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+
+                  startAsForeground();
+
+                  if (!shown) {
+                      showOverlay();
+                  }
+
+                  return START_STICKY;
+              }
+
+              private void showOverlay() {
+                  try {
+                      windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+
+                      FrameLayout root = new FrameLayout(this);
+                      root.setBackgroundColor(Color.TRANSPARENT); // overlay vazio
+
+                      int type;
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+                      } else {
+                          type = WindowManager.LayoutParams.TYPE_PHONE;
+                      }
+
+                      int flags =
+                              WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                      | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                                      | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
+
+                      WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                              WindowManager.LayoutParams.MATCH_PARENT,
+                              WindowManager.LayoutParams.MATCH_PARENT,
+                              type,
+                              flags,
+                              PixelFormat.TRANSLUCENT
+                      );
+
+                      params.gravity = Gravity.TOP | Gravity.START;
+
+                      overlayView = root;
+                      windowManager.addView(overlayView, params);
+                      shown = true;
+
+                  } catch (Exception e) {
+                      stopSelf();
+                  }
+              }
+
+              private void hideOverlay() {
+                  if (windowManager != null && overlayView != null) {
+                      try {
+                          windowManager.removeView(overlayView);
+                      } catch (Exception ignored) {}
+                  }
+                  overlayView = null;
+                  windowManager = null;
+                  shown = false;
+              }
+
+              private void startAsForeground() {
+                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel ch = new NotificationChannel(
+                              CHANNEL_ID, "Overlay", NotificationManager.IMPORTANCE_LOW
+                      );
+                      nm.createNotificationChannel(ch);
+                  }
+
+                  Intent openApp = new Intent(this, MainActivity.class);
+
+                  int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      piFlags |= PendingIntent.FLAG_IMMUTABLE;
+                  }
+
+                  PendingIntent pi = PendingIntent.getActivity(this, 0, openApp, piFlags);
+
+                  Notification.Builder b;
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      b = new Notification.Builder(this, CHANNEL_ID);
+                  } else {
+                      b = new Notification.Builder(this);
+                  }
+
+                  b.setContentTitle("Overlay ativo")
+                   .setContentText("Toque para abrir o app")
+                   .setSmallIcon(android.R.drawable.ic_menu_view)
+                   .setContentIntent(pi);
+
+                  Notification n = (Build.VERSION.SDK_INT >= 16) ? b.build() : b.getNotification();
+                  startForeground(NOTIF_ID, n);
+              }
+
+              @Override
+              public void onDestroy() {
+                  hideOverlay();
+                  stopForeground(true);
+                  super.onDestroy();
+              }
+          }
+          EOF
+
+          # ---------- Resources ----------
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+
+          cat > app/src/main/res/layout/activity_main.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:orientation="vertical"
+              android:padding="16dp"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
+
+              <Button
+                  android:id="@+id/btnStart"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="@string/btn_start"/>
+
+              <Button
+                  android:id="@+id/btnStop"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="@string/btn_stop"
+                  android:layout_marginTop="12dp"/>
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">OverlayApp</string>
+              <string name="btn_start">Começar overlay</string>
+              <string name="btn_stop">Terminar processo</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values/styles.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="android:Theme.Material.Light"/>
+          </resources>
+          EOF
+
+      - name: Build APK (Debug)
+        shell: bash
+        run: |
+          set -e
+          cd OverlayApp
+          curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-7.0.2-bin.zip
+          unzip -q gradle.zip
+          ./gradle-7.0.2/bin/gradle assembleDebug
+
+      - name: Zip sources (optional)
+        shell: bash
+        run: |
+          set -e
+          cd OverlayApp
+          zip -r ../OverlayApp-sources.zip . -x "**/build/**" -x "**/.gradle/**"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: OverlayApp/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload Sources ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: OverlayApp-sources
+          path: OverlayApp-sources.zip
