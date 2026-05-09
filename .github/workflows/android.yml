@@ -16,33 +16,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java 11
+      # Java 17 para rodar o sdkmanager (cmdline-tools 16)
+      - name: Setup Java 17 (for sdkmanager)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "11"
+          java-version: "17"
 
       - name: Prepare Android SDK (accept licenses + install packages)
         shell: bash
         run: |
           set -e
 
-          echo "JAVA:"
-          java -version
-
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          ls -la "$ANDROID_SDK_ROOT" || true
-
-          # garante que sdkmanager está no PATH
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
 
-          # em alguns ambientes, "latest" pode não existir; tenta achar outro
+          # fallback se "latest" não existir
           if [ ! -f "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-            echo "cmdline-tools/latest não encontrado. Listando cmdline-tools..."
-            ls -la "$ANDROID_SDK_ROOT/cmdline-tools" || true
             FOUND="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | head -n 1 || true)"
             if [ -z "$FOUND" ]; then
-              echo "sdkmanager não encontrado no runner."
+              echo "sdkmanager não encontrado."
               exit 1
             fi
             export PATH="$(dirname "$FOUND"):$ANDROID_SDK_ROOT/platform-tools:$PATH"
@@ -51,17 +43,22 @@ jobs:
           mkdir -p "$HOME/.android"
           touch "$HOME/.android/repositories.cfg"
 
-          echo "sdkmanager version:"
+          java -version
           sdkmanager --version
 
-          echo "Accepting licenses..."
           yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses
 
-          echo "Installing packages..."
           sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
             "platform-tools" \
             "platforms;android-33" \
             "build-tools;33.0.2"
+
+      # Java 11 para o build (Gradle 7.0.2 + AGP 7.0.4)
+      - name: Setup Java 11 (for Gradle build)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
 
       - name: Generate Android project sources
         shell: bash
@@ -89,7 +86,6 @@ jobs:
                   classpath 'com.android.tools.build:gradle:7.0.4'
               }
           }
-
           allprojects {
               repositories {
                   google()
@@ -293,8 +289,7 @@ jobs:
               private View overlayView;
               private boolean shown = false;
 
-              @Override
-              public IBinder onBind(Intent intent) { return null; }
+              @Override public IBinder onBind(Intent intent) { return null; }
 
               @Override
               public int onStartCommand(Intent intent, int flags, int startId) {
@@ -318,12 +313,9 @@ jobs:
                       FrameLayout root = new FrameLayout(this);
                       root.setBackgroundColor(Color.TRANSPARENT);
 
-                      int type;
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                          type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
-                      } else {
-                          type = WindowManager.LayoutParams.TYPE_PHONE;
-                      }
+                      int type = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                              ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                              : WindowManager.LayoutParams.TYPE_PHONE;
 
                       int flags =
                               WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
