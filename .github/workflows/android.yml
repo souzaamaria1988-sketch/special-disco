@@ -11,51 +11,22 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-        # Não usando cache: gradle aqui pra evitar o erro de "No file matched..."
-
-      - name: Detect Gradle Wrapper (gradlew)
-        id: gw
-        shell: bash
-        run: |
-          if [ -f "./gradlew" ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-          elif [ -f "./android/gradlew" ]; then
-            echo "dir=android" >> "$GITHUB_OUTPUT"
-          else
-            echo "Não achei o gradlew. Garanta que o projeto Android/Gradle está no repo (ou em /android) e que o arquivo gradlew foi commitado."
-            exit 1
-          fi
+          cache: gradle
 
       - name: Build Debug APK
-        working-directory: ${{ steps.gw.outputs.dir }}
-        shell: bash
         run: |
-          chmod +x gradlew
+          chmod +x ./gradlew
           ./gradlew --no-daemon assembleDebug
 
-      - name: Collect APK(s)
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          # procura APKs de debug gerados pelo Gradle
-          find . -type f -path "*outputs/apk/*" -name "*debug*.apk" -print -exec cp "{}" artifacts/ \;
-          echo "APKs coletados:"
-          ls -la artifacts
-          # Falha se não achou nada
-          test -n "$(ls -A artifacts 2>/dev/null)"
-
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: apk-debug
-          path: artifacts/*.apk
+          path: app/build/outputs/apk/debug/*.apk
